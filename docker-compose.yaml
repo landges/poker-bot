@@ -7,5 +7,5 @@ services:
     env_file:
       - .env
     volumes:
-      - ./:/app  # для хранения базы данных вне контейнера
+      - ./poker.db:/app/poker.db  # для хранения базы данных вне контейнера
     restart: unless-stopped
