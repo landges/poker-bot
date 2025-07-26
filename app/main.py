@@ -14,8 +14,7 @@ from db import init_db, SessionLocal
 from models import Group, Player, GameSession, PlayerResult, GroupPlayer
 from utils import get_global_player_stats
 from aiogram.client.default import DefaultBotProperties
-# TOKEN = getenv("BOT_TOKEN")
-TOKEN = "8244196020:AAGIDgnz2DzVBwIWX9Ls5dX2Fh1LLGLjt54"
+TOKEN = getenv("BOT_TOKEN")
 # bot = Bot(token=TOKEN)
 dp = Dispatcher()
 router = Router()
