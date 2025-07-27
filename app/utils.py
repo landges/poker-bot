@@ -3,26 +3,47 @@
 from typing import Union
 from sqlalchemy.orm import Session
 from models import Player, PlayerResult, GroupPlayer, Group
+from sqlalchemy import func
 
 
 def get_global_player_stats(db: Session, group_tg_id: Union[int, None] = None) -> str:
-    query = db.query(Player)
-
-    if group_tg_id:
-        query = (
-            query.join(GroupPlayer)
-            .join(GroupPlayer.group)
-            .filter(Group.tg_id == group_tg_id)
-        )
-
-    players = query.all()
-
     result_lines = []
 
-    for player in players:
-        total = sum(res.amount for res in player.results)
-        name = player.username or player.full_name or "Без имени"
-        result_lines.append(f"{name} {total:+}")
+    if group_tg_id:
+        group = db.query(Group).filter_by(tg_id=group_tg_id).first()
+        if not group:
+            return "Группа не найдена."
+
+        group_players = (
+            db.query(GroupPlayer)
+            .filter_by(group_id=group.id)
+            .join(GroupPlayer.player)
+            .all()
+        )
+
+        for gp in group_players:
+            player = gp.player
+            # фильтруем результаты только по этой группе
+            total = (
+                db.query(PlayerResult)
+                .join(PlayerResult.session)
+                .filter(
+                    PlayerResult.player_id == player.id,
+                    PlayerResult.session.has(group_id=group.id)
+                )
+                .with_entities(func.sum(PlayerResult.amount))
+                .scalar() or 0
+            )
+            name = player.username or player.full_name or "Без имени"
+            result_lines.append(f"{name} {total:+}")
+
+    else:
+        # Глобальная статистика по всем группам
+        players = db.query(Player).all()
+        for player in players:
+            total = sum(res.amount for res in player.results)
+            name = player.username or player.full_name or "Без имени"
+            result_lines.append(f"{name} {total:+}")
 
     # Сортируем по убыванию выигрыша
     result_lines.sort(key=lambda x: -int(x.split()[-1]))
