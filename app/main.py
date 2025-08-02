@@ -48,6 +48,72 @@ async def cmd_stats(message: Message):
         text = get_global_player_stats(db, group_tg_id=group_id)
     await message.reply(f"<b>Статистика игроков:</b>\n{text}")
 
+@dp.message(Command("undo_last"))
+async def cmd_undo_last(message: Message):
+    group_id = message.chat.id if message.chat.type.endswith("group") else None
+    if not group_id:
+        await message.reply("Команда доступна только в группах.")
+        return
+
+    with SessionLocal() as db:
+        group = db.query(Group).filter_by(tg_id=group_id).first()
+        if not group:
+            await message.reply("Группа не зарегистрирована.")
+            return
+
+        last_session = (
+            db.query(GameSession)
+            .filter_by(group_id=group.id)
+            .order_by(GameSession.date.desc())
+            .first()
+        )
+
+        if not last_session:
+            await message.reply("Нет сохранённых игр для удаления.")
+            return
+
+        game_date = last_session.date.strftime("%d.%m.%Y")
+
+        # Получим ID всех игроков в этой сессии
+        player_ids = [res.player_id for res in last_session.results]
+
+        # Удаляем все результаты игроков в этой сессии
+        db.query(PlayerResult).filter_by(session_id=last_session.id).delete()
+
+        # Удаляем саму игровую сессию
+        db.delete(last_session)
+
+        deleted_players = []
+
+        # Проверяем, остались ли у игроков другие результаты в этой группе
+        for pid in player_ids:
+            remaining_results = (
+                db.query(PlayerResult)
+                .join(PlayerResult.session)
+                .filter(
+                    PlayerResult.player_id == pid,
+                    GameSession.group_id == group.id
+                )
+                .count()
+            )
+
+            # Если не осталось результатов — удаляем GroupPlayer
+            if remaining_results == 0:
+                gp = db.query(GroupPlayer).filter_by(player_id=pid, group_id=group.id).first()
+                if gp:
+                    name = gp.player.username or gp.player.full_name or f"id {pid}"
+                    deleted_players.append(name)
+                    db.delete(gp)
+
+        db.commit()
+
+        if deleted_players:
+            msg = f"Результаты за {game_date} удалены 🗑\nУдалены из группы: {', '.join(deleted_players)}"
+        else:
+            msg = f"Результаты за {game_date} удалены 🗑"
+
+        await message.reply(msg)
+
 
 @dp.message()
 async def handle_report_message(message: Message):

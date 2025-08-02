@@ -7,7 +7,7 @@ from sqlalchemy import func
 
 
 def get_global_player_stats(db: Session, group_tg_id: Union[int, None] = None) -> str:
-    result_lines = []
+    result_data = []
 
     if group_tg_id:
         group = db.query(Group).filter_by(tg_id=group_tg_id).first()
@@ -23,7 +23,7 @@ def get_global_player_stats(db: Session, group_tg_id: Union[int, None] = None) -
 
         for gp in group_players:
             player = gp.player
-            # фильтруем результаты только по этой группе
+
             total = (
                 db.query(PlayerResult)
                 .join(PlayerResult.session)
@@ -34,18 +34,35 @@ def get_global_player_stats(db: Session, group_tg_id: Union[int, None] = None) -
                 .with_entities(func.sum(PlayerResult.amount))
                 .scalar() or 0
             )
+
+            game_count = (
+                db.query(func.count(PlayerResult.id))
+                .join(PlayerResult.session)
+                .filter(
+                    PlayerResult.player_id == player.id,
+                    PlayerResult.session.has(group_id=group.id)
+                )
+                .scalar()
+            )
+
             name = player.username or player.full_name or "Без имени"
-            result_lines.append(f"{name} {total:+}")
+            result_data.append((name, total, game_count))
 
     else:
-        # Глобальная статистика по всем группам
         players = db.query(Player).all()
         for player in players:
             total = sum(res.amount for res in player.results)
+            game_count = len(player.results)
             name = player.username or player.full_name or "Без имени"
-            result_lines.append(f"{name} {total:+}")
+            result_data.append((name, total, game_count))
 
-    # Сортируем по убыванию выигрыша
-    result_lines.sort(key=lambda x: -int(x.split()[-1]))
+    # Сортировка по убыванию выигрыша
+    result_data.sort(key=lambda x: -x[1])
+
+    result_lines = [
+        f"{name} {total:+} ({games} игр)"
+        for name, total, games in result_data
+    ]
 
     return "\n".join(result_lines) if result_lines else "Нет данных."
+
