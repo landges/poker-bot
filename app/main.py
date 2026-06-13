@@ -10,7 +10,6 @@ from aiogram.types import Message, ChatMemberUpdated
 from aiogram.filters import CommandStart, Command
 from aiogram.enums import ParseMode
 import aiohttp
-from aiohttp import A
 from db import init_db, SessionLocal
 from models import Group, Player, GameSession, PlayerResult, GroupPlayer
 from utils import get_global_player_stats
