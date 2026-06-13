@@ -9,11 +9,13 @@ from aiogram import F, Bot, Dispatcher, types, Router
 from aiogram.types import Message, ChatMemberUpdated
 from aiogram.filters import CommandStart, Command
 from aiogram.enums import ParseMode
-
+import aiohttp
+from aiohttp import A
 from db import init_db, SessionLocal
 from models import Group, Player, GameSession, PlayerResult, GroupPlayer
 from utils import get_global_player_stats
 from aiogram.client.default import DefaultBotProperties
+from aiogram.client.session.aiohttp import AiohttpSession
 TOKEN = getenv("BOT_TOKEN")
 # bot = Bot(token=TOKEN)
 dp = Dispatcher()
@@ -194,7 +196,9 @@ async def handle_report_message(message: Message):
 
 async def main() -> None:
     # Initialize Bot instance with default bot properties which will be passed to all API calls
-    bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+    auth = aiohttp.BasicAuth(login='ve1qNC', password='nyMsgK')
+    session = AiohttpSession(proxy=('http://95.164.245.46:9756', auth))
+    bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML), session=session)
     init_db()
     # And the run events dispatching
     await dp.start_polling(bot)
