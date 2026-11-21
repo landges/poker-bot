@@ -1,0 +1,11 @@
+services:
+  bot:
+    networks:
+      - default
+      - tunnel
+
+networks:
+  default: {}
+  tunnel:
+    external: true
+    name: ${TUNNEL_NETWORK:-tunnel}

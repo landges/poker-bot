@@ -1,205 +1,122 @@
 import asyncio
 import logging
-from os import getenv
-import re
-from datetime import datetime
 import sys
+from html import escape
 
-from aiogram import F, Bot, Dispatcher, types, Router
-from aiogram.types import Message, ChatMemberUpdated
-from aiogram.filters import CommandStart, Command
-from aiogram.enums import ParseMode
-import aiohttp
-from db import init_db, SessionLocal
-from models import Group, Player, GameSession, PlayerResult, GroupPlayer
-from utils import get_global_player_stats
+from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.client.session.aiohttp import AiohttpSession
-TOKEN = getenv("BOT_TOKEN")
-# bot = Bot(token=TOKEN)
+from aiogram.enums import ChatMemberStatus, ChatType, ParseMode
+from aiogram.filters import Command, CommandStart
+from aiogram.types import ChatMemberUpdated, Message
+from sqlalchemy.exc import SQLAlchemyError
+
+from app.access import require_game_editor
+from app.config import settings
+from app.db import SessionLocal, init_db
+from app.models import Group
+from app.reports import ReportError, parse_report, save_report, undo_last_game
+from app.utils import get_global_player_stats
+
+
+logger = logging.getLogger(__name__)
 dp = Dispatcher()
-router = Router()
+GROUP_TYPES = (ChatType.GROUP, ChatType.SUPERGROUP)
+
 
 @dp.my_chat_member()
 async def handle_bot_added(event: ChatMemberUpdated):
-    if event.new_chat_member.status in ("member", "administrator"):
-        with SessionLocal() as db:
+    if event.chat.type not in GROUP_TYPES:
+        return
+    if event.new_chat_member.status in (ChatMemberStatus.MEMBER, ChatMemberStatus.ADMINISTRATOR):
+        with SessionLocal.begin() as db:
             group = db.query(Group).filter_by(tg_id=event.chat.id).first()
-            if not group:
-                group = Group(tg_id=event.chat.id, name=event.chat.title)
-                db.add(group)
+            if group is None:
+                db.add(Group(tg_id=event.chat.id, name=event.chat.title))
             else:
                 group.name = event.chat.title
-            db.commit()
 
 
 @dp.message(CommandStart())
 async def cmd_start(message: Message):
-    await message.reply("Привет! Отправь отчёт в формате:\n\n"
-                        "<code>Результаты 26.07.2025:\n"
-                        "@user1 +100\n"
-                        "@user2 -300\n"
-                        "Имя Фамилия +200</code>")
+    await message.reply(
+        "Привет! Владелец и администраторы группы могут отправлять отчёты в формате:\n\n"
+        "<code>Результаты 26.07.2025:\n"
+        "@user1 +100\n"
+        "@user2 -300\n"
+        "Имя Фамилия +200</code>\n\n"
+        "/stats — статистика игроков\n"
+        "/undo_last — удалить игру с самой поздней датой (для администраторов)"
+    )
 
 
 @dp.message(Command("stats"))
 async def cmd_stats(message: Message):
-    group_id = message.chat.id if message.chat.type.endswith("group") else None
+    group_id = message.chat.id if message.chat.type in GROUP_TYPES else None
     with SessionLocal() as db:
         text = get_global_player_stats(db, group_tg_id=group_id)
     await message.reply(f"<b>Статистика игроков:</b>\n{text}")
 
+
 @dp.message(Command("undo_last"))
 async def cmd_undo_last(message: Message):
-    group_id = message.chat.id if message.chat.type.endswith("group") else None
-    if not group_id:
+    if message.chat.type not in GROUP_TYPES:
         await message.reply("Команда доступна только в группах.")
         return
+    if not await require_game_editor(message):
+        return
 
-    with SessionLocal() as db:
-        group = db.query(Group).filter_by(tg_id=group_id).first()
-        if not group:
-            await message.reply("Группа не зарегистрирована.")
-            return
+    try:
+        with SessionLocal.begin() as db:
+            game_date, removed_names = undo_last_game(db, message.chat.id)
+    except ReportError as exc:
+        await message.reply(escape(str(exc)))
+        return
+    except SQLAlchemyError:
+        logger.exception("Could not undo a game in chat %s", message.chat.id)
+        await message.reply("Не удалось удалить игру. Изменения отменены, попробуйте ещё раз.")
+        return
 
-        last_session = (
-            db.query(GameSession)
-            .filter_by(group_id=group.id)
-            .order_by(GameSession.date.desc())
-            .first()
-        )
-
-        if not last_session:
-            await message.reply("Нет сохранённых игр для удаления.")
-            return
-
-        game_date = last_session.date.strftime("%d.%m.%Y")
-
-        # Получим ID всех игроков в этой сессии
-        player_ids = [res.player_id for res in last_session.results]
-
-        # Удаляем все результаты игроков в этой сессии
-        db.query(PlayerResult).filter_by(session_id=last_session.id).delete()
-
-        # Удаляем саму игровую сессию
-        db.delete(last_session)
-
-        deleted_players = []
-
-        # Проверяем, остались ли у игроков другие результаты в этой группе
-        for pid in player_ids:
-            remaining_results = (
-                db.query(PlayerResult)
-                .join(PlayerResult.session)
-                .filter(
-                    PlayerResult.player_id == pid,
-                    GameSession.group_id == group.id
-                )
-                .count()
-            )
-
-            # Если не осталось результатов — удаляем GroupPlayer
-            if remaining_results == 0:
-                gp = db.query(GroupPlayer).filter_by(player_id=pid, group_id=group.id).first()
-                if gp:
-                    name = gp.player.username or gp.player.full_name or f"id {pid}"
-                    deleted_players.append(name)
-                    db.delete(gp)
-
-        db.commit()
-
-        if deleted_players:
-            msg = f"Результаты за {game_date} удалены 🗑\nУдалены из группы: {', '.join(deleted_players)}"
-        else:
-            msg = f"Результаты за {game_date} удалены 🗑"
-
-        await message.reply(msg)
+    text = f"Результаты за {game_date:%d.%m.%Y} удалены 🗑"
+    if removed_names:
+        text += "\nУдалены из группы: " + ", ".join(escape(name) for name in removed_names)
+    await message.reply(text)
 
 
 @dp.message()
 async def handle_report_message(message: Message):
-    if not message.text:
+    if not message.text or message.chat.type not in GROUP_TYPES:
         return
-    print(message.text)
-    if not message.chat.type.endswith("group"):
+    if not message.text.strip().startswith("Результаты "):
         return
-    text = message.text.strip()
-    date_match = re.search(r"Результаты (\d{2}\.\d{2}\.\d{4}):", text)
-    if not date_match:
+    if not await require_game_editor(message):
         return
 
     try:
-        game_date = datetime.strptime(date_match.group(1), "%d.%m.%Y").date()
-    except ValueError:
-        await message.reply("Неверный формат даты.")
+        game_date, entries = parse_report(message.text)
+        with SessionLocal.begin() as db:
+            save_report(db, message.chat.id, message.chat.title, game_date, entries)
+    except ReportError as exc:
+        await message.reply(escape(str(exc)))
+        return
+    except SQLAlchemyError:
+        logger.exception("Could not save a report in chat %s", message.chat.id)
+        await message.reply("Не удалось сохранить отчёт. Изменения отменены, попробуйте ещё раз.")
         return
 
-    lines = text.splitlines()[1:]
-
-    with SessionLocal() as db:
-        group = db.query(Group).filter_by(tg_id=message.chat.id).first()
-        if not group:
-            group = Group(tg_id=message.chat.id, name=message.chat.title)
-            db.add(group)
-            db.commit()
-            db.refresh(group)
-
-        existing_session = db.query(GameSession).filter_by(group_id=group.id, date=game_date).first()
-        if existing_session:
-            await message.reply(f"Сессия за {game_date.strftime('%d.%m.%Y')} уже сохранена.")
-            return
-
-        session_entry = GameSession(group_id=group.id, date=game_date)
-        db.add(session_entry)
-        db.commit()
-        db.refresh(session_entry)
-
-        for line in lines:
-            match = re.match(r"(?P<name>@?\S.+?)\s+(?P<amount>[+-]?\d+)", line.strip())
-            if not match:
-                continue
-
-            name = match.group("name").strip()
-            amount = int(match.group("amount"))
-
-            if name.startswith("@"):  # username
-                player = db.query(Player).filter_by(username=name).first()
-                if not player:
-                    player = Player(username=name)
-            else:
-                player = db.query(Player).filter_by(full_name=name).first()
-                if not player:
-                    player = Player(full_name=name)
-
-            db.add(player)
-            db.commit()
-            db.refresh(player)
-
-            # Привязка игрока к группе
-            gp_exists = db.query(GroupPlayer).filter_by(group_id=group.id, player_id=player.id).first()
-            if not gp_exists:
-                gp_link = GroupPlayer(group_id=group.id, player_id=player.id)
-                db.add(gp_link)
-
-            # Добавляем результат
-            result = PlayerResult(
-                session_id=session_entry.id,
-                player_id=player.id,
-                amount=amount
-            )
-            db.add(result)
-
-        db.commit()
-        await message.reply("Результаты сохранены ✅")
+    await message.reply("Результаты сохранены ✅")
 
 
 async def main() -> None:
-    # Initialize Bot instance with default bot properties which will be passed to all API calls
-    auth = aiohttp.BasicAuth(login='ve1qNC', password='nyMsgK')
-    session = AiohttpSession(proxy=('http://95.164.245.46:9756', auth))
-    bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML), session=session)
+    if not settings.bot_token:
+        raise RuntimeError("Задайте BOT_TOKEN в переменных окружения или файле .env.")
     init_db()
-    # And the run events dispatching
+    session = AiohttpSession(proxy=settings.proxy_url)
+    bot = Bot(
+        token=settings.bot_token,
+        default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+        session=session,
+    )
     await dp.start_polling(bot)
 
 

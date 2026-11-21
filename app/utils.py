@@ -1,68 +1,55 @@
-# utils.py
+from html import escape
+from typing import Optional
 
-from typing import Union
+from sqlalchemy import and_, func
 from sqlalchemy.orm import Session
-from models import Player, PlayerResult, GroupPlayer, Group
-from sqlalchemy import func
+
+from app.models import GameSession, Group, GroupPlayer, Player, PlayerResult
 
 
-def get_global_player_stats(db: Session, group_tg_id: Union[int, None] = None) -> str:
-    result_data = []
-
-    if group_tg_id:
-        group = db.query(Group).filter_by(tg_id=group_tg_id).first()
-        if not group:
+def get_global_player_stats(db: Session, group_tg_id: Optional[int] = None) -> str:
+    if group_tg_id is not None:
+        totals = (
+            db.query(
+                PlayerResult.player_id,
+                GameSession.group_id,
+                func.sum(PlayerResult.amount).label("total"),
+                func.count(func.distinct(PlayerResult.session_id)).label("games"),
+            )
+            .join(PlayerResult.session)
+            .join(GameSession.group)
+            .filter(Group.tg_id == group_tg_id)
+            .group_by(PlayerResult.player_id, GameSession.group_id)
+            .subquery()
+        )
+        total = func.coalesce(totals.c.total, 0)
+        rows = (
+            db.query(Player.id, Player.username, Player.full_name, total,
+                     func.coalesce(totals.c.games, 0))
+            .select_from(Group)
+            .outerjoin(GroupPlayer, GroupPlayer.group_id == Group.id)
+            .outerjoin(Player, Player.id == GroupPlayer.player_id)
+            .outerjoin(totals, and_(totals.c.player_id == Player.id, totals.c.group_id == Group.id))
+            .filter(Group.tg_id == group_tg_id)
+            .order_by(total.desc(), Player.id)
+            .all()
+        )
+        if not rows:
             return "Группа не найдена."
-
-        group_players = (
-            db.query(GroupPlayer)
-            .filter_by(group_id=group.id)
-            .join(GroupPlayer.player)
+    else:
+        total = func.coalesce(func.sum(PlayerResult.amount), 0)
+        rows = (
+            db.query(Player.id, Player.username, Player.full_name, total,
+                     func.count(func.distinct(PlayerResult.session_id)))
+            .outerjoin(PlayerResult, PlayerResult.player_id == Player.id)
+            .group_by(Player.id, Player.username, Player.full_name)
+            .order_by(total.desc(), Player.id)
             .all()
         )
 
-        for gp in group_players:
-            player = gp.player
-
-            total = (
-                db.query(PlayerResult)
-                .join(PlayerResult.session)
-                .filter(
-                    PlayerResult.player_id == player.id,
-                    PlayerResult.session.has(group_id=group.id)
-                )
-                .with_entities(func.sum(PlayerResult.amount))
-                .scalar() or 0
-            )
-
-            game_count = (
-                db.query(func.count(PlayerResult.id))
-                .join(PlayerResult.session)
-                .filter(
-                    PlayerResult.player_id == player.id,
-                    PlayerResult.session.has(group_id=group.id)
-                )
-                .scalar()
-            )
-
-            name = player.username or player.full_name or "Без имени"
-            result_data.append((name, total, game_count))
-
-    else:
-        players = db.query(Player).all()
-        for player in players:
-            total = sum(res.amount for res in player.results)
-            game_count = len(player.results)
-            name = player.username or player.full_name or "Без имени"
-            result_data.append((name, total, game_count))
-
-    # Сортировка по убыванию выигрыша
-    result_data.sort(key=lambda x: -x[1])
-
-    result_lines = [
-        f"{name} {total:+} ({games} игр)"
-        for name, total, games in result_data
+    lines = [
+        f"{escape(username or full_name or 'Без имени')} {amount:+} ({games} игр)"
+        for player_id, username, full_name, amount, games in rows
+        if player_id is not None
     ]
-
-    return "\n".join(result_lines) if result_lines else "Нет данных."
-
+    return "\n".join(lines) if lines else "Нет данных."

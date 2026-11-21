@@ -17,5 +17,5 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Стартуем бота
-COPY app/ .
-CMD ["python", "main.py"]
+COPY app/ ./app/
+CMD ["python", "-m", "app.main"]

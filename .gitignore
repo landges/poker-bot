@@ -136,6 +136,10 @@ celerybeat.pid
 
 # Environments
 .env
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
 .envrc
 .venv
 env/
@@ -200,6 +204,14 @@ cython_debug/
 #  refer to https://docs.cursor.com/context/ignore-files
 .cursorignore
 .cursorindexingignore
+
+# Local database, Telegram archives, and recovery artifacts
+poker.db
+poker.db-*
+recovery/
+result.json
+*.session
+*.session-*
 
 # Marimo
 marimo/_static/

@@ -1,7 +1,7 @@
 from datetime import date
 from typing import Optional, List
 
-from sqlalchemy import ForeignKey, UniqueConstraint
+from sqlalchemy import ForeignKey, Index, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -57,6 +57,9 @@ class GameSession(Base):
 
 class PlayerResult(Base):
     __tablename__ = "player_results"
+    __table_args__ = (
+        Index("uq_player_results_session_player", "session_id", "player_id", unique=True),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     session_id: Mapped[int] = mapped_column(ForeignKey("game_sessions.id"), nullable=False)
